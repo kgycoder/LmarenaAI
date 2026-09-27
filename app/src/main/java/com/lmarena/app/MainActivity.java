@@ -4,11 +4,9 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.util.Log;
-import android.view.View;
-import android.view.WindowInsetsController;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
@@ -16,7 +14,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -26,18 +24,14 @@ import com.lmarena.app.databinding.ActivityMainBinding;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String TAG = "LMArena";
     private static final String DIRECT_URL = "https://arena.ai/text/direct";
     private static final String AGENT_URL  = "https://arena.ai/agent/";
-    private static final String BASE_URL   = "https://arena.ai";
     private static final String PREFS_NAME = "lmarena_prefs";
 
     private ActivityMainBinding binding;
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
     private SharedPreferences prefs;
-
-    // Current chat mode: "direct" or "agent"
     private String chatMode = "direct";
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -45,109 +39,108 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Edge-to-edge with dark background
+        // 상태바/네비게이션 바 다크 색상
         getWindow().setStatusBarColor(Color.parseColor("#0a0a0a"));
-        getWindow().setNavigationBarColor(Color.parseColor("#0a0a0a"));
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            WindowInsetsController wic = getWindow().getInsetsController();
-            if (wic != null) {
-                wic.setSystemBarsAppearance(0,
-                        WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS |
-                        WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
-            }
-        }
+        getWindow().setNavigationBarColor(Color.parseColor("#111111"));
 
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        prefs    = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         chatMode = prefs.getString("chat_mode", "direct");
 
         webView      = binding.webView;
         swipeRefresh = binding.swipeRefresh;
 
-        setupSwipeRefresh();
         setupWebView();
         setupBottomBar();
+        updateModeButtons();
 
-        // Restore cookies across sessions
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+        // 쿠키 영속 저장
+        CookieManager cm = CookieManager.getInstance();
+        cm.setAcceptCookie(true);
+        cm.setAcceptThirdPartyCookies(webView, true);
 
         loadCurrentMode();
     }
 
-    // ── SwipeRefresh ─────────────────────────────────────────────────
-    private void setupSwipeRefresh() {
-        swipeRefresh.setColorSchemeColors(Color.parseColor("#7c6fcd"));
-        swipeRefresh.setProgressBackgroundColorSchemeColor(Color.parseColor("#1a1a1a"));
-        swipeRefresh.setOnRefreshListener(() -> {
-            webView.reload();
-        });
-    }
-
-    // ── WebView setup ─────────────────────────────────────────────────
+    // ── WebView ───────────────────────────────────────────────────────
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         WebSettings ws = webView.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
         ws.setDatabaseEnabled(true);
-        ws.setSupportZoom(false);
-        ws.setBuiltInZoomControls(false);
+        ws.setSupportZoom(true);
+        ws.setBuiltInZoomControls(true);
         ws.setDisplayZoomControls(false);
         ws.setLoadWithOverviewMode(true);
         ws.setUseWideViewPort(true);
         ws.setMediaPlaybackRequiresUserGesture(false);
-        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // Mixed content: arena.ai는 HTTPS이므로 NEVER_ALLOW 유지
+        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
-        // Desktop UA override so arena.ai serves the full app (not a stripped mobile page)
-        // We keep a mobile UA but append "Desktop" hint so we still pass mobile checks
-        String ua = ws.getUserAgentString();
-        ws.setUserAgentString(ua + " LMArenaAndroid/1.0");
+        webView.addJavascriptInterface(new JsBridge(), "ArenaAndroid");
 
-        webView.addJavascriptInterface(new ArenaJsBridge(), "ArenaAndroid");
+        // ── WebViewClient: URL 필터링 ──
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                String url = request.getUrl().toString();
+                // WebView 안에서 열어야 할 도메인 목록
+                if (isAllowedHost(url)) {
+                    view.loadUrl(url);   // 직접 로드 (인터셉트 안 함)
+                    return true;         // true = WebViewClient가 처리했다고 알림
+                }
+                // 그 외 외부 링크는 무시 (시스템 브라우저 열지 않음)
+                return true;
+            }
 
+            @Override
+            public void onReceivedError(WebView view, int errorCode,
+                                        String description, String failingUrl) {
+                // 네트워크 오류 시 새로고침 스피너 중단
+                swipeRefresh.setRefreshing(false);
+            }
+        });
+
+        // ── WebChromeClient: 로딩 진행 ──
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
-            public void onProgressChanged(WebView view, int newProgress) {
-                if (newProgress == 100) {
+            public void onProgressChanged(WebView view, int progress) {
+                if (progress == 100) {
                     swipeRefresh.setRefreshing(false);
-                    // Inject mobile helper JS after page fully loaded
-                    injectMobileHelpers();
+                    injectHelpers();
                 } else {
                     swipeRefresh.setRefreshing(true);
                 }
             }
         });
 
-        webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                String url = request.getUrl().toString();
-                // Allow arena.ai and google auth inside WebView
-                if (url.contains("arena.ai") ||
-                        url.contains("accounts.google.com") ||
-                        url.contains("lmarena.ai") ||
-                        url.contains("google.com/recaptcha")) {
-                    return false; // load in webview
-                }
-                // Everything else: let system handle (open browser)
-                return true;
-            }
-
-            @Override
-            public void onPageFinished(WebView view, String url) {
-                super.onPageFinished(view, url);
-                // Open the mobile sidebar so Log in button is accessible
-                injectSidebarReveal();
-                updateModeButtons();
-            }
-        });
+        // SwipeRefresh
+        swipeRefresh.setColorSchemeColors(Color.parseColor("#7c6fcd"));
+        swipeRefresh.setProgressBackgroundColorSchemeColor(Color.parseColor("#1a1a1a"));
+        swipeRefresh.setOnRefreshListener(() -> webView.reload());
     }
 
-    // ── Bottom navigation bar ─────────────────────────────────────────
+    /** arena.ai 관련 도메인이면 WebView 안에서 처리 */
+    private boolean isAllowedHost(String url) {
+        try {
+            String host = Uri.parse(url).getHost();
+            if (host == null) return false;
+            return host.endsWith("arena.ai")
+                || host.endsWith("lmarena.ai")
+                || host.endsWith("google.com")
+                || host.endsWith("googleapis.com")
+                || host.endsWith("gstatic.com")
+                || host.endsWith("recaptcha.net");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ── 하단 탭 ────────────────────────────────────────────────────────
     private void setupBottomBar() {
         binding.btnDirect.setOnClickListener(v -> switchMode("direct"));
         binding.btnAgent.setOnClickListener(v -> switchMode("agent"));
@@ -155,7 +148,6 @@ public class MainActivity extends AppCompatActivity {
             webView.reload();
             Toast.makeText(this, "새로고침 중...", Toast.LENGTH_SHORT).show();
         });
-        updateModeButtons();
     }
 
     private void switchMode(String mode) {
@@ -168,8 +160,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateModeButtons() {
         boolean isDirect = "direct".equals(chatMode);
-        binding.btnDirect.setAlpha(isDirect ? 1.0f : 0.45f);
-        binding.btnAgent.setAlpha(isDirect ? 0.45f : 1.0f);
+        binding.btnDirect.setAlpha(isDirect ? 1.0f : 0.4f);
+        binding.btnAgent.setAlpha(isDirect ? 0.4f : 1.0f);
     }
 
     private void loadCurrentMode() {
@@ -177,120 +169,57 @@ public class MainActivity extends AppCompatActivity {
         webView.loadUrl(url);
     }
 
-    // ── JS injection helpers ──────────────────────────────────────────
-
-    /**
-     * Injects CSS & JS tweaks that make the LM Arena web UI comfortable on mobile:
-     * - hides desktop-only sidebar toggle/nav that overlap content
-     * - ensures the composer textarea is always reachable
-     * - taps the "Open sidebar" button so the Log in link appears (mobile DOM)
-     */
-    private void injectMobileHelpers() {
-        String js = "(function() {" +
-            // ── 1. Open sidebar so Login button is visible on mobile ──
-            "  var sidebarBtn = document.querySelector(" +
-            "    'button[aria-label=\"Open sidebar\"]');" +
-            "  if (sidebarBtn) { sidebarBtn.click(); }" +
-
-            // ── 2. Remove the fixed bottom safe-area padding that hides the composer ──
-            "  document.querySelectorAll('[class*=\"pb-safe\"]').forEach(function(el) {" +
-            "    el.style.paddingBottom = '0px';" +
-            "  });" +
-
-            // ── 3. Shrink oversized top header on mobile so chat area is taller ──
-            "  var header = document.querySelector('header');" +
-            "  if (header) { header.style.minHeight = '48px'; }" +
-
-            // ── 4. Inject our status indicator if not already there ──
-            "  if (!document.getElementById('lma-status')) {" +
-            "    var bar = document.createElement('div');" +
-            "    bar.id = 'lma-status';" +
-            "    bar.style.cssText = 'position:fixed;bottom:56px;left:0;right:0;" +
-            "      height:2px;background:#7c6fcd;opacity:0;transition:opacity .3s;z-index:9999;';" +
-            "    document.body.appendChild(bar);" +
+    // ── JS → Native 브리지 ────────────────────────────────────────────
+    private void injectHelpers() {
+        webView.evaluateJavascript(
+            "(function(){" +
+            // 모바일에서 사이드바 버튼 클릭 → 로그인 버튼 노출
+            "  var sb=document.querySelector('button[aria-label=\"Open sidebar\"]');" +
+            "  if(sb) sb.click();" +
+            // 생성 중 감지 → 상단 바 색상 표시
+            "  if(!window.__lmaWatcher){" +
+            "    window.__lmaWatcher=true;" +
+            "    setInterval(function(){" +
+            "      var s=!!document.querySelector(\"button[aria-label='Stop generation']\");" +
+            "      if(window.ArenaAndroid) ArenaAndroid.onGenerating(s);" +
+            "    },800);" +
             "  }" +
-
-            // ── 5. Watch for generation indicator (stop button) and report to native ──
-            "  if (!window.__lmaObserverRunning) {" +
-            "    window.__lmaObserverRunning = true;" +
-            "    var bar = document.getElementById('lma-status');" +
-            "    var lastGenerating = false;" +
-            "    setInterval(function() {" +
-            "      var stopBtn = document.querySelector(" +
-            "        \"button[aria-label='Stop generation'],\" +" +
-            "        \"button:has(svg rect[width='12'][height='12'])\");" +
-            "      var generating = !!stopBtn;" +
-            "      if (bar) bar.style.opacity = generating ? '1' : '0';" +
-            "      if (generating !== lastGenerating) {" +
-            "        lastGenerating = generating;" +
-            "        if (window.ArenaAndroid) {" +
-            "          ArenaAndroid.onGenerationStateChanged(generating);" +
-            "        }" +
-            "      }" +
-            "    }, 600);" +
-            "  }" +
-            "})();";
-        webView.evaluateJavascript(js, null);
+            "})();",
+            null
+        );
     }
 
-    /**
-     * On pages that need it, tap the sidebar button so the Log in button appears
-     * (mobile DOM difference noted in spec).
-     */
-    private void injectSidebarReveal() {
-        String js = "(function() {" +
-            "  var btn = document.querySelector('button[aria-label=\"Open sidebar\"]');" +
-            "  if (btn) { btn.click(); }" +
-            "})();";
-        webView.evaluateJavascript(js, null);
-    }
-
-    // ── JS ↔ Native bridge ────────────────────────────────────────────
-    public class ArenaJsBridge {
+    public class JsBridge {
         @JavascriptInterface
-        public void onGenerationStateChanged(boolean generating) {
-            runOnUiThread(() -> {
-                // Could update a native indicator if desired
-                Log.d(TAG, "Generation: " + generating);
-            });
-        }
-
-        @JavascriptInterface
-        public void log(String msg) {
-            Log.d(TAG, "JS: " + msg);
+        public void onGenerating(boolean active) {
+            runOnUiThread(() ->
+                getWindow().setStatusBarColor(
+                    active ? Color.parseColor("#3d2f99") : Color.parseColor("#0a0a0a")
+                )
+            );
         }
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────────────
+    // ── 생명주기 ──────────────────────────────────────────────────────
     @Override
-    protected void onResume() {
-        super.onResume();
-        webView.onResume();
-    }
+    protected void onResume()  { super.onResume();  webView.onResume(); }
 
     @Override
     protected void onPause() {
         super.onPause();
         webView.onPause();
-        // Persist cookies
         CookieManager.getInstance().flush();
     }
 
     @Override
     protected void onDestroy() {
-        if (webView != null) {
-            webView.stopLoading();
-            webView.destroy();
-        }
+        if (webView != null) { webView.stopLoading(); webView.destroy(); }
         super.onDestroy();
     }
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
     }
 }
